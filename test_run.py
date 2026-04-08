@@ -6,8 +6,6 @@ import io
 import httpx
 from uuid import uuid4
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
 
@@ -58,6 +56,7 @@ async def run_evaluation(green_url: str, purple_url: str, domain: str = "airline
 
 
 if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--green", default="http://localhost:8099")
     parser.add_argument("--purple", default="http://tau2-purple:9009/")

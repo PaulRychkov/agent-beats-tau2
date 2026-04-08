@@ -35,9 +35,9 @@ uv sync
 # Set your API key (supports any OpenAI-compatible endpoint)
 export OPENAI_API_KEY=sk-...
 # Optional: use a custom base URL (e.g. proxy)
-export OPENAI_API_BASE=https://api.openai.com/v1
+export OPENAI_API_BASE=...
 # Optional: choose model (default: gpt-4o-mini)
-export OPENAI_MODEL=gpt-4o-mini
+export OPENAI_MODEL=...
 
 # Start the agent
 uv run src/server.py
@@ -52,13 +52,6 @@ docker build -t tau2-purple-agent .
 docker run -p 9009:9009 -e OPENAI_API_KEY=sk-... tau2-purple-agent
 ```
 
-## Configuration
-
-| Environment Variable | Default | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | — | API key (required) |
-| `OPENAI_API_BASE` | `https://api.openai.com/v1` | API base URL (supports any OpenAI-compatible proxy) |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model to use |
 
 ## Testing
 
@@ -81,4 +74,4 @@ Make the package public in: GitHub → Your Profile → Packages → agent-beats
 
 1. Go to [agentbeats.dev](https://agentbeats.dev) and click **Register Agent**
 2. Select **Purple**, fill in the Docker image `ghcr.io/paulrychkov/agent-beats-tau2:latest`
-3. Submit an assessment via **Quick Submit** on the [τ²-Bench leaderboard](https://agentbeats.dev/agentbeater/tau2-agentbeats)
+3. Submit an assessment via **Quick Submit** on the [τ²-Bench leaderboard](https://agentbeats.dev/agentbeater/tau2-bench)
