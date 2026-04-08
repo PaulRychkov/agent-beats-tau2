@@ -6,60 +6,128 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import Message, TaskState, Part, TextPart
 from a2a.utils import get_message_text, new_agent_text_message
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a customer service agent. You will receive tasks from a benchmark evaluator.
-
-On the first turn you will receive a full system prompt describing your role, available tools, and the conversation so far.
-On subsequent turns you will receive tool results or new user messages.
-
-You MUST always respond with valid JSON in exactly this format:
-{"name": "<function_name>", "arguments": {<arguments>}}
-
-To respond to the user (instead of calling a tool), use:
-{"name": "respond", "arguments": {"content": "<your message>"}}
-
-Never include any text outside the JSON. Never call more than one tool at a time."""
+FIRST_MESSAGE_SEPARATOR = "Now here are the user messages:"
+TOOLS_SECTION_START = "Here's a list of tools you can use"
 
 
 class Agent:
     def __init__(self):
         self.history: list[dict] = []
+        self.system_prompt: str | None = None
+        self.tools: list[dict] = []
+        self.pending_tool_call_id: str | None = None
+        self.turn = 0
         self.client = AsyncOpenAI(
             api_key=os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1"),
         )
-        self.model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self.model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+    def _parse_first_message(self, text: str) -> tuple[str, str]:
+        if FIRST_MESSAGE_SEPARATOR in text:
+            system_part, user_part = text.split(FIRST_MESSAGE_SEPARATOR, 1)
+            return system_part.strip(), user_part.strip()
+        return "", text
+
+    def _extract_tools(self, system_text: str) -> list[dict]:
+        """Parse OpenAI-compatible tool definitions from the system prompt text."""
+        try:
+            start = system_text.find('[', system_text.find(TOOLS_SECTION_START))
+            if start == -1:
+                return []
+            decoder = json.JSONDecoder()
+            tools, _ = decoder.raw_decode(system_text, start)
+            return [t for t in tools if t.get('function', {}).get('name') != 'respond']
+        except Exception as e:
+            logger.warning("Failed to extract tools: %s", e)
+            return []
+
+    def _is_tool_result(self, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped.startswith(('{', '[')):
+            return False
+        try:
+            json.loads(stripped)
+            return True
+        except json.JSONDecodeError:
+            return False
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
+        self.turn += 1
         input_text = get_message_text(message)
-        self.history.append({"role": "user", "content": input_text})
+
+        if self.system_prompt is None:
+            system_ctx, user_content = self._parse_first_message(input_text)
+            self.system_prompt = system_ctx
+            self.tools = self._extract_tools(system_ctx)
+            if user_content:
+                self.history.append({"role": "user", "content": user_content})
+            logger.info("[turn %d] INIT tools=%d | user: %s", self.turn, len(self.tools), user_content[:200])
+        else:
+            if self.pending_tool_call_id:
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": self.pending_tool_call_id,
+                    "content": input_text,
+                })
+                self.pending_tool_call_id = None
+                logger.info("[turn %d] TOOL: %s", self.turn, input_text[:200])
+            else:
+                self.history.append({"role": "user", "content": input_text})
+                logger.info("[turn %d] USER: %s", self.turn, input_text[:200])
 
         await updater.update_status(
             TaskState.working, new_agent_text_message("Thinking...")
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
+            kwargs: dict = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": self.system_prompt},
                     *self.history,
                 ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-            )
-            reply = response.choices[0].message.content or "{}"
+                "temperature": 0.0,
+            }
+            if self.tools:
+                kwargs["tools"] = self.tools
+                kwargs["tool_choice"] = "auto"
+                kwargs["parallel_tool_calls"] = False
+
+            response = await self.client.chat.completions.create(**kwargs)
+            choice = response.choices[0]
+
+            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                tool_call = choice.message.tool_calls[0]
+                self.pending_tool_call_id = tool_call.id
+                self.history.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tc.model_dump() for tc in choice.message.tool_calls],
+                })
+                reply = json.dumps({
+                    "name": tool_call.function.name,
+                    "arguments": json.loads(tool_call.function.arguments),
+                })
+            else:
+                content = choice.message.content or ""
+                self.history.append({"role": "assistant", "content": content})
+                reply = json.dumps({
+                    "name": "respond",
+                    "arguments": {"content": content},
+                })
+
+            logger.info("[turn %d] AGENT: %s", self.turn, reply[:300])
+
         except Exception as e:
-            logging.error(f"LLM call failed: {e}")
-            reply = json.dumps({"name": "respond", "arguments": {"content": "I'm sorry, I encountered an error. Please try again."}})
-
-        try:
-            json.loads(reply)
-        except json.JSONDecodeError:
-            logging.warning(f"LLM returned invalid JSON: {reply[:200]}")
-            reply = json.dumps({"name": "respond", "arguments": {"content": reply}})
-
-        self.history.append({"role": "assistant", "content": reply})
+            logger.error("[turn %d] Error: %s", self.turn, e)
+            reply = json.dumps({
+                "name": "respond",
+                "arguments": {"content": "I'm sorry, I encountered an error. Please try again."},
+            })
 
         await updater.add_artifact(
             parts=[Part(root=TextPart(text=reply))],
